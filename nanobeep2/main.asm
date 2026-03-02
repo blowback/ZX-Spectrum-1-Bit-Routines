@@ -405,8 +405,8 @@ _prescale2
 		LD	A, B			;4	; test loop counter
 		OR	C			;4	; BC_a == 0?
 		JR	NZ, _soundloop		;12/7	; 12T taken, 7T not taken
-					; loop total: 102T
-					; (base=86, +8 pwmSweep, +8 prescaling)
+					; loop total: 116T
+					; (base=86, +8 pwmSweep, +8 prescaling, +14 borderMasking)
 		EXX				;4	; bank B active
 		JR	_readPtn		;12
 
