@@ -1,4 +1,4 @@
-speed equ #f	
+speed equ #20
 
 	dw ptn0
 	dw ptn0
