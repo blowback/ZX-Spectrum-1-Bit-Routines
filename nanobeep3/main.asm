@@ -90,9 +90,6 @@ end
 ;    target: 19.34 us * 8 MHz = 155.4 T per iter
 ; 2. compensate for the new beeper bit with a simple RRCA before the OUT
 ;    this comes out of our loop padding allowance.
-;
-; with 16 bit counters counting up:
-; note_feq = (E * f_cpu) / (116 * 2^(bit + 9))  // bit = 3 for the Beast
 ; 
 ;******************************************************************
 KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
