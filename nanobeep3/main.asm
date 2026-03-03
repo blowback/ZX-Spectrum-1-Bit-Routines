@@ -71,7 +71,7 @@ end
 ;******************************************************************
 ; Ant's notes:
 ; Pulse Interleaving 
-; 2 channels, 16 bit accumulators + noise
+; 2 channels, 8.8 bit accumulators
 ;
 ; This is designed to be as small as possible.
 ; Now targetting an 8 MHz MicroBeast.
