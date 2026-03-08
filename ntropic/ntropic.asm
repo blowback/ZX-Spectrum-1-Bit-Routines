@@ -228,6 +228,8 @@ include "music.asm"
 ; byte 2: ch2 pitch counter, as above
 ; byte 3: noise ROM HI byte. change character of noise
 ; - 0xFF = end of pattern marker
+; 
+; Notes from C#0 to B7. Upper octaves are detuned.
 
 ; Now targetting an 8 MHz MicroBeast (with sjasmplus).
 ;
