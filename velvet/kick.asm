@@ -14,7 +14,7 @@
 ;;;
 ;;; REGISTER USAGE: F/F' destroyed, SP += 6
 
-
+    IFDEF SPECTRUM
 NO_DECAY equ #5faf              ; xor a; ld e,a
 LINEAR_DECAY equ #1d00          ; nop; dec e
 LINEAR_DECAY_X2 equ #1d1d       ; dec e; dec e
@@ -143,3 +143,148 @@ _oldA equ $+1
 _wait_end                       ;+12
     ds 2                        ;  8
     jp _wait_return_end         ; 10 -- 30
+
+
+
+
+
+
+
+
+
+    ELSE
+;******************************************************************
+; Ant's notes:
+
+; Generates a kick drum sound by sweeping a square wave from high to low
+; pitch. The sound is produced entirely through the 1-bit beeper using a
+; phase accumulator (HL) with a frequency divider (DE). The pitch sweeps
+; downward by halving D (the coarse pitch byte) whenever the sweep timer
+; (E, used as a rotating bit mask) triggers.
+;
+; The output uses a 2-level PWM trick: each sample outputs the
+; volume value, then immediately outputs it right-shifted (RRCA) twice,
+; creating 3 output pulses of decreasing width within a single sample
+; period. This gives a richer sound than a simple on/off square wave.
+;
+; The drum has two phases:
+;   1. SWEEP phase: pitch descends until D reaches 0
+;   2. END phase: pitch is frozen, volume decays according to the
+;      chosen decay mode (self-modifying code patches the instructions)
+;
+; USAGE: 1) Define DRUM_RETURN_ADDRESS
+;        2) Prepare stack (parameters read via POP):
+;           SP+0 - decay mode (NO_DECAY, LINEAR_DECAY/_X2, EXPONENTIAL_DECAY)
+;           SP+2 - sweep speed (low byte = bit mask, more bits = faster)
+;                  initial pitch (high byte, higher = higher starting pitch)
+;           SP+4 - volume (low nybble, bits 4-6) | length (high byte)
+;        3) JP kick_drum_init
+;
+; TIMING: ca. (length * 112 * 256 + (length - 1) * 24) cycles
+KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
+AUDIO_PORT	EQU	0x24	; 16c550 MCR 
+AUDIO_BIT	EQU	0x08	; bit 3
+
+
+; Decay mode constants — these are actually Z80 instruction bytes that get
+; written into _end_mode via self-modifying code.
+NO_DECAY            EQU	0x5FAF          ; encodes "ld e,a; xor a" — zeroes the pitch,
+                                        ; effectively silencing immediately
+LINEAR_DECAY        EQU	0x1D00          ; encodes "dec e; nop" — subtracts 1 from E
+                                        ; (volume counter) each overflow
+LINEAR_DECAY_X2     EQU	0x1D1D          ; encodes "dec e; dec e" — subtracts 2
+EXPONENTIAL_DECAY   EQU	0x3BCB          ; encodes "srl e" — halves E for exponential
+                                        ; decay (fast at first, slow tail)
+
+kick_drum_init
+        RR	B                           ; additional half-row adjust (carry from
+                                        ; control byte bit 0 shifts into B)
+    ; Save all registers
+        LD	(_oldHL), HL                ; 16    save via self-modifying code
+        LD	(_oldDE), DE                ; 20
+        LD	(_oldBC), BC                ; 20
+        LD	(_oldA), A                  ; 13
+        EX	AF, AF'                     ;  4
+        LD	(_oldAshadow), A            ; 13
+
+    ; Read drum parameters from the music data stream (via SP/POP)
+        POP	BC                          ; 10    C = volume (bits 4-6), B = length
+        LD	A, B                        ;  4    length → A
+        EX	AF, AF'                     ;  4    stash length in A'
+        POP	DE                          ; 10    E = sweep speed mask, D = initial pitch
+        POP	HL                          ; 10    HL = decay mode (2 instruction bytes)
+        LD	(_end_mode), HL             ; 16    patch decay instructions into end phase
+        XOR	A                           ;  4
+        LD	H, A                        ;  4    HL = 0 (reset phase accumulator)
+        LD	L, A                        ;  4
+        LD	B, 0xFE                     ;  7    B = sample counter (254, adj. for init)
+        EX	AF, AF'                     ;  4 -- init 163
+
+; SWEEP PHASE - pitch descends while D > 0
+; Each iteration is exactly 112 T-states. The phase accumulator HL has
+; the frequency divider DE added to it. When HL overflows, we
+; check if the pitch should sweep down and to generate the audio output.
+        EX	AF, AF'                     ; bring length counter back into A'
+_play_kick
+        NOP                             ; timing padding
+        OUT	AUDIO_PORT, A               ; 11    output current sample (from prev iter)
+        ADD	HL, DE                      ; 11    advance phase accumulator
+        JR	NC, _wait                   ; 12/7  no overflow — skip to output section
+
+    ; Phase accumulator overflowed — check if we should sweep the pitch down.
+    ; E serves double duty: it's the low byte of the freq divider AND a
+    ; rotating bit mask that controls sweep speed. Each overflow, we rotate
+    ; E left. If a 1 bit rotates into carry, we halve D (the pitch).
+        RLC	E                           ;  8    rotate sweep speed mask
+        JR	NC, _no_sweep_update        ; 12/7  no carry = don't sweep yet
+        SRL	D                           ;  8    halve the coarse pitch (sweep down!)
+
+    ; Generate audio output using the PWM trick:
+    ; H contains the high byte of the phase accumulator. RLCA moves its top
+    ; bit into carry, then SBC A,A converts that to #FF or #00. ANDing with
+    ; C (volume) gives the output level. Two RRCA + OUT pairs follow,
+    ; creating a quick burst of decreasing pulse widths within one sample.
+        LD	A, H                        ;  4    \
+        RLCA                            ;  4     | convert phase accumulator overflow
+        SBC	A, A                        ;  4     | into square wave: #FF or #00
+        AND	C                           ;  4    /  mask with volume
+        NOP                             ;   timing
+        OUT	AUDIO_PORT, A               ; 11  first (widest) output pulse
+        RRCA                            ;  4    halve the value
+        OUT	AUDIO_PORT, A               ; 11  second (narrower) output pulse
+        RRCA                            ;  4    halve again (this becomes next iter's out)
+        DEC	B                           ;  4    decrement sample counter
+        JP	NZ, _play_kick              ; 10 --- 112 T-states total
+
+    ; Inner loop done (256 samples) — decrement length counter
+        EX	AF, AF'                     ; get length counter from A'
+        DEC	A                           ; one fewer outer loop iteration
+        JR	NZ, _play_kick - 1          ; -1 to include the ex af,af' before _play_kick
+        JR	_exit                       ; length exhausted, we're done
+
+    ; --- No-overflow path: phase didn't wrap, just output audio ---
+_wait                                   ; +12   (jr nc taken adds 5 extra T-states)
+        LD	A, D                        ;  4    check if pitch has swept down to 0
+        OR	A                           ;  4
+        JR	Z, _play_kick_end0          ; 12/7  D=0: pitch is zero, switch to end phase
+
+_no_sweep_update
+    ; Same PWM output as above (common path for both sweep and no-sweep)
+        NOP                             ;  4    timing
+        LD	A, H                        ;  4    convert phase acc to square wave
+        RLCA                            ;  4
+        SBC	A, A                        ;  4
+        AND	C                           ;  4    mask with volume
+        NOP
+        OUT	AUDIO_PORT, A               ; 11    first pulse
+        RRCA                            ;  4
+        OUT	AUDIO_PORT, A               ; 11    second pulse
+        RRCA                            ;  4    (carried into next iteration)
+        DJNZ	_play_kick              ; 13 --- 112 T-states total
+
+        EX	AF, AF'
+        DEC	A
+        JR	NZ, _play_kick - 1
+        JR	_exit
+
+    ENDIF
