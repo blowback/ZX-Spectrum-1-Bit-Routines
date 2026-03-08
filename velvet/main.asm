@@ -290,18 +290,17 @@ init_player
 ; The sequence is a list of 16-bit pointers to patterns, terminated by 0.
 ; After the 0 terminator, a loop-back address follows.
 _read_sequence
-_sequence_pointer
-        EQU	$+1                         ; self-mod: operand patched with current pos
+_sequence_pointer EQU	$+1             ; self-mod: operand patched with current pos
         LD	SP, 0                       ; restore SP to current sequence position
 _skip_sequence_pointer_update
         POP	HL                          ; read next pattern pointer from sequence
         LD	A, H
         OR	L                           ; is it 0 (end of sequence)?
-IF      LOOPING	= 1
+    IF      LOOPING	= 1
         JR	NZ, _continue               ; no: continue to this pattern
-ELSE
+    ELSE
         JP	Z, _exit_player             ; yes: stop playback
-ENDIF
+    ENDIF
         POP	HL                          ; yes: fetch the loop-back address
         LD	SP, HL                      ; rewind SP to the loop point
         JR	_skip_sequence_pointer_update ; and re-read
@@ -333,8 +332,7 @@ _read_pattern
         AND	0x1F                        ; mask key bits
         JP	NZ, _exit_player            ; any key pressed? exit playback
 
-_pattern_pointer
-        EQU	$+1                         ; self-mod: patched with current pattern pos
+_pattern_pointer EQU	$+1             ; self-mod: patched with current pattern pos
         LD	SP, 0                       ; point SP at current pattern position
         POP	AF                          ; F = control bits, A = step length high
         JR	Z, _read_sequence           ; Z set (bit 6) = end of pattern marker
@@ -396,8 +394,7 @@ _no_timer_update
         EX	AF, AF'                     ; swap back (A' = remaining step count)
 
     ;; --- Noise envelope ---
-_noise_env_ptr
-        EQU	$+1                         ; self-mod: noise envelope read position
+_noise_env_ptr EQU	$+1                 ; self-mod: noise envelope read position
         LD	HL, 0
         LD	A, (hl)                     ; read current noise density value
         OR	A
@@ -409,8 +406,7 @@ _noise_env_ptr
 
 _no_noise_env_update
                                         ; --- Channel 1 volume envelope ---
-_ch1_env_ptr
-        EQU	$+1
+_ch1_env_ptr EQU	$+1
         LD	HL, 0
         LD	A, (hl)
         OR	A
@@ -421,8 +417,7 @@ _ch1_env_ptr
 
 _no_ch1_env_update
                                         ; --- Channel 2 volume envelope ---
-_ch2_env_ptr
-        EQU	$+1
+_ch2_env_ptr EQU	$+1
         LD	HL, 0
         LD	A, (hl)
         OR	A
@@ -433,8 +428,7 @@ _ch2_env_ptr
 
 _no_ch2_env_update
     ;; --- Channel 3 volume envelope ---
-_ch3_env_ptr
-        EQU	$+1
+_ch3_env_ptr EQU	$+1
         LD	HL, 0
         LD	A, (hl)
         OR	A
@@ -446,7 +440,8 @@ _ch3_env_ptr
 
 ; SAMPLE GENERATION LOOP - cycle-counted inner loop
 ; runs B (256) times per envelope tick and generates one beeper sample per iteration.
-; Every code path through this loop takes exactly 240 T-states to maintain stable pitch.
+; Every code path through this loop takes exactly 548 T-states (8 MHz) to maintain
+; the same sample rate as 240 T-states at 3.5 MHz. Pitch error: 0.10%.
 ;
 ; The mixing strategy: each channel contributes to the accumulator C.
 ; Noise adds +1, each tone channel adds its volume (0..8) when its phase
@@ -461,7 +456,7 @@ _play_note
         LD	A, E                        ; 4     load noise pulse counter
         ADD	A, C                        ; 4     add noise density
         LD	E, A                        ; 4     store back
-        JR	NC, _wait                   ; 12/7  no overflow? skip noise, go to timing pad
+        JP	NC, _wait                   ; 10    no overflow? skip noise, go to timing pad
 
     ; Noise pulse triggered — run PRNG
     ; This is a quick-and-dirty linear congruential PRNG using SP itself.
@@ -480,35 +475,30 @@ _play_note
     ; "sbc a,a" converts carry to #FF or #00, then AND with volume gives
     ; the channel's contribution, which is added to the mix accumulator C.
 _wait_ret
-_fdiv_ch1
-        EQU	$+1                         ; self-mod: ch1 frequency divider
+        DS	76                          ; 304T shared padding (8 MHz timing)
+_fdiv_ch1 EQU	$+1                     ; self-mod: ch1 frequency divider
         LD	DE, 0                       ; 10
         ADD	IY, DE                      ; 15    advance ch1 phase accumulator
         SBC	A, A                        ; 4     A = #FF if overflow, #00 if not
-_vol_ch1
-        EQU	$+1                         ; self-mod: ch1 volume (patched by envelope)
+_vol_ch1 EQU	$+1                     ; self-mod: ch1 volume (patched by envelope)
         AND	2                           ; 7     mask with volume level
         ADD	A, C                        ; 4     add to mix accumulator
         LD	C, A                        ; 4
 
-_fdiv_ch2
-        EQU	$+1                         ; self-mod: ch2 frequency divider
+_fdiv_ch2 EQU	$+1                     ; self-mod: ch2 frequency divider
         LD	DE, 0                       ; 10
         ADD	HL, DE                      ; 11    advance ch2 phase accumulator (HL')
         SBC	A, A                        ; 4
-_vol_ch2
-        EQU	$+1                         ; self-mod: ch2 volume
+_vol_ch2 EQU	$+1                     ; self-mod: ch2 volume
         AND	2                           ; 7
         ADD	A, C                        ; 4
         LD	C, A                        ; 4
 
-_fdiv_ch3
-        EQU	$+1                         ; self-mod: ch3 frequency divider
+_fdiv_ch3 EQU	$+1                     ; self-mod: ch3 frequency divider
         LD	DE, 0                       ; 10
         ADD	IX, DE                      ; 15    advance ch3 phase accumulator
         SBC	A, A                        ; 4
-_vol_ch3
-        EQU	$+1                         ; self-mod: ch3 volume
+_vol_ch3 EQU	$+1                     ; self-mod: ch3 volume
         AND	2                           ; 7
         ADD	A, C                        ; 4     C now holds total mixed output level
         JR	Z, _no_outp                 ; 12/7  if zero, go to silence path
@@ -519,7 +509,8 @@ _vol_ch3
         LD	A, AUDIO_BIT                ; 7     bit 3 = beeper ON
         OUT	AUDIO_PORT, A               ; 11    toggle speaker ON
         EXX                             ; 4     switch back to alt set for next iteration
-        DJNZ	_play_note              ; 13 -- 50 --- 240 total T-states
+        DEC	B                           ; 4     \  replaces DJNZ (out of range
+        JP	NZ, _play_note              ; 10    /  with 76-byte padding block)
         JP	_update_env
 
     ; --- Output OFF path (47 T-states + 3 padding = 50) ---
@@ -528,14 +519,16 @@ _no_outp                                ; +12   (jr z taken = 12, vs 7 not taken
         RET	NZ                          ;  5    SP is music data, not a return address)
         OUT	AUDIO_PORT, A               ; 11    A=0, so beeper OFF
         EXX                             ; 4     switch back to alt set
-        DJNZ	_play_note              ; 13 -- 47 (+ 3 from jr z taken vs not = 50)
+        DEC	B                           ; 4
+        JP	NZ, _play_note              ; 10
         JP	_update_env
 
     ; --- No-noise timing pad (54 T-states to match noise path) ---
-_wait                                   ; +12   (jr nc taken = 12, vs 7 = +5)
+_wait                                   ; JP NC always 10T (no asymmetry like JR NC)
         EXX                             ; 4     switch to main set (no noise contribution)
-        DS	7                           ; 28    7 bytes of padding (7 × NOP = 28 T-states)
-        JP	_wait_ret                   ; 10 -- 54 total (matches noise-active path)
+        DS	7                           ; 28    7 × NOP = 28 T-states
+        RET	C                           ; 5     timing filler (carry guaranteed clear by JP NC)
+        JP	_wait_ret                   ; 10 -- 57T (matches noise path: 10+47=57T)
 
 ; EXIT - restore machine state
 _exit_player
@@ -547,8 +540,7 @@ _oldSP  EQU	$+1
         EI                              ; re-enable interrupts
         RET
 
-DRUM_RETURN_ADDRESS
-        EQU	_drum_return
+DRUM_RETURN_ADDRESS EQU	_drum_return
 kick_drum
         INCLUDE	"kick.asm"
 
