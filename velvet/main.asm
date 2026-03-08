@@ -247,6 +247,22 @@ music_data
 ;              HL'= ch2 phase accumulator
 ;              IX = ch3 phase accumulator
 
+; Now targetting an 8 MHz MicroBeast (with sjasmplus).
+;
+; Other changes:
+;
+; 1) different output port for beeper
+; 2) different bit (bit 3) in port for beeper
+;    The kick drum PWM trick relies on RRCA to progressively clear the 
+;    speaker bit (uses bits 1-4 on speccy) - on MicroBeast we'll need
+; bits 3-5, so we'll add an SRL C in kick_drum_init
+; 3) added delay in wait_ret to compensate for 8 Mhz vs old 3.5 MHz.
+;    Speccy was 240T and we need 548.57T to keep the same sample rate
+;    That's 77 NOPs, so we can'use DJNZ any more (DEC B:JP NZ instead)
+; 4) attempt to keep drum timing accurate also @ 8Mhz
+;    Speccy was 120T, we want 274T. Distribute padding in the common
+;    output section (after AND C, before the OUT).
+;
 KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
 AUDIO_PORT	EQU	0x24	; 16c550 MCR 
 AUDIO_BIT	EQU	0x08	; bit 3
@@ -500,7 +516,7 @@ _vol_ch3
     ; --- Output ON path (50 T-states to end of loop) ---
         DEC	A                           ; 4     consume one "unit" of output level
         LD	C, A                        ; 4     store reduced level for next sample
-        LD	A, 0x10                     ; 7     bit 4 = beeper ON
+        LD	A, AUDIO_BIT                ; 7     bit 3 = beeper ON
         OUT	AUDIO_PORT, A               ; 11    toggle speaker ON
         EXX                             ; 4     switch back to alt set for next iteration
         DJNZ	_play_note              ; 13 -- 50 --- 240 total T-states

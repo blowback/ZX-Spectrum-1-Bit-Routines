@@ -209,6 +209,7 @@ kick_drum_init
 
     ; Read drum parameters from the music data stream (via SP/POP)
         POP	BC                          ; 10    C = volume (bits 4-6), B = length
+        SRL	C                           ;  8    shift volume down 1 bit (bit 4→bit 3 for AUDIO_BIT)
         LD	A, B                        ;  4    length → A
         EX	AF, AF'                     ;  4    stash length in A'
         POP	DE                          ; 10    E = sweep speed mask, D = initial pitch
@@ -286,5 +287,60 @@ _no_sweep_update
         DEC	A
         JR	NZ, _play_kick - 1
         JR	_exit
+
+_play_kick_end0
+        LD	E, 0x80
+        JP	_wait_return_end
+
+        EX	AF, AF'
+_play_kick_end
+        NOP
+        OUT	AUDIO_PORT, A               ; 11
+        ADD	HL, DE                      ; 11
+        JR	NC, _wait_end               ; 12/7
+
+_end_mode
+        DS	2                           ;  8
+        LD	A, 0                        ;  7    timing
+        DS	2                           ;  8 -- 30
+
+_wait_return_end
+        LD	A, H                        ;  4
+        RLCA                            ;  4
+        SBC	A, A                        ;  4
+        AND	C                           ;  4
+        NOP
+        OUT	AUDIO_PORT, A               ; 11
+        RRCA                            ;  4
+        OUT	AUDIO_PORT, A               ; 11
+        RRCA                            ;  4
+        DEC	B                           ;  4
+        JP	NZ, _play_kick_end          ; 10
+
+        EX	AF, AF'
+        DEC	A
+        JR	NZ, _play_kick_end - 1
+
+_exit
+_oldHL  EQU	$+1
+        LD	HL, 0                       ; 10
+_oldDE  EQU	$+1
+        LD	DE, 0                       ; 10
+_oldBC  EQU	$+1
+        LD	BC, 0                       ; 10
+_oldAshadow
+        EQU	$+1
+        LD	A, 0                        ;  7
+        EX	AF, AF'                     ;  4
+_oldA   EQU	$+1
+        LD	A, 0                        ;  7
+        JP	DRUM_RETURN_ADDRESS         ; 10 -- exit 58, init+exit 221
+
+_wait_end                               ;+12
+        DS	2                           ;  8
+        JP	_wait_return_end            ; 10 -- 30
+
+
+
 
     ENDIF
