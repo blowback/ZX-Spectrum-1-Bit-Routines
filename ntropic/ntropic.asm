@@ -234,7 +234,13 @@ include "music.asm"
 ; Other changes:
 ;
 ; 1) different output port for beeper
-; 2) different bit (bit 3) in port for beeper 
+; 2) different bit (bit 3) in port for beeper - change masks from 0x10 to AUDIO_BIT
+; 3) added delay loop at dtim to compensate for 8 MHz vs 3.5 MHz
+;    original: 184T / 3.5 MHz = 52.57 us per iteration
+;    target: 52.57 us * 8 MHz = 420.57T per iteration
+;    delay loop adds 242T -> 426T total -> 53.25 us (1.3% sharp, close enough)
+; 
+; Drums aren't compensated, so they'll be pitched up 2.3x, oh well.
 ;
 ;******************************************************************
 KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
@@ -286,7 +292,7 @@ main		PUSH	HL			; preserve data pointer
 						; NOP path.
 
 
-rdata		LD	IYH, 0x10		; output switch mask (EAR bit)
+rdata		LD	IYH, AUDIO_BIT		; output switch mask
 
 		POP	HL			; restore data pointer
 
@@ -324,7 +330,7 @@ rsk1		LD	D, A			; D = current counter for ch1
 		PUSH	HL			; save patter pointer
 		EXX 				; switch register bank
 		POP	HL                  	; HL' now -> byte 2
-		LD	B, 0x10			; B' = speaker toggle mask for ch2 (EAR bit)
+		LD	B, AUDIO_BIT		; B' = speaker toggle mask for ch2
 		LD	A, (hl)			; A = pitch counter for ch2
 
 		OR	A			; mute switch ch2 if pitch=0
@@ -359,7 +365,7 @@ sndlp		EX	AF, AF'		; 4	; swap in ch1's output mask
 						; same number of cycles as the ff reload code
 		; ch1 counter reached ZERO
 m1		EQU	$+1
-		XOR	IYH		; 8	; XOR output mask with 0x10 (EAR) or 0 if muted
+		XOR	IYH		; 8	; XOR output mask with AUDIO_BIT or 0 if muted
 		LD	D, E		; 4	; reload counter from E
 skip1
 
@@ -375,7 +381,7 @@ skip1
 
 		; ch2 counter reached ZERO
 m2		EQU	$+1
-		XOR	B		; 4	; toggle ch2's output mask with B' (0x10-EAR or 0)
+		XOR	B		; 4	; toggle ch2's output mask with B' (AUDIO_BIT or 0)
 		LD	D, E		; 4	; reload counter from E'
 skip2
 		PUSH	AF		; 11	; preserve output mask ch2
@@ -385,7 +391,7 @@ skip2
 noise		LD	A, (hl)		; 7	; read byte from ROM
 					; 43T output for ch2
 					;
-		AND	0x10		; 7	; isolate EAR bit
+		AND	AUDIO_BIT	; 7	; isolate audio bit
 
 		OUT	AUDIO_PORT, A	; 11	; output noise
 		BIT	7, H		; 8	; check if H has rolled over past 0x7f (into the 
@@ -396,11 +402,15 @@ noise		LD	A, (hl)		; 7	; read byte from ROM
 		NOP			; 4	; waste some time
 
 dtim
+		LD	A, 15		; 7	; 8 MHz timing compensation
+.dly		DEC	A		; 4	; delay loop: 7 + 14*16 + 11 = 242T
+		JR	NZ, .dly	; 12/7
+
 		DEC	BC		; 6	; decrement master duration counter
 		LD	A, B		; 4
 		OR	C		; 4	; check if BC is 0
 		JP	NZ, sndlp	; 10	; if not, do another iteration
-					; 184
+					; 426T (184 + 242)
 
 		POP	AF		; clean ch2 mask from stack
 		JR	rdata		; read next note
@@ -451,7 +461,7 @@ intStack
 ;****************************************************************************************	
 ;music data
 
-include		"music.asm"
+		INCLUDE	"music.asm"
 	ENDIF
 end
 	
