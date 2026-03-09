@@ -476,23 +476,23 @@ seqPointer	EQU	$+1
 		EXX			; 4	; switch to shadow regs
 		INC	HL		; 6	; timing padding
 		POP	HL		; 10	; HL' = next pattern address from sequence
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
+		LD	A, IXH		; 8	; load ch1 output state
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
-		LD	A, IXH		;8	; load ch1 output state
-		OUT	AUDIO_PORT, A	;11	; OUTPUT CH1 
-
-		LD	A, H		;4	; check if pattern address is 0 (end of sequence)
-		OR	L		;4
-IF		looping	= 0
-		JP	Z, exit		;10	; if end of sequence and not looping, exit
-ELSE
-		JP	Z, doLoop	; 10	; if end of sequence, jump to loop handler
-ENDIF
+		LD	A, H		; 4	; check if pattern address is 0 (end of sequence)
+		OR	L		; 4
+		JP	Z, doLoop	; 10	; end of sequence → loop back (looping=1)
 		LD	(ptnPointer), HL	; 16	; store pattern address for pattern reader
 		LD	HL, task_read_ptn	; 10	; prepare to schedule pattern reader task
-
-		LD	A, 0		; 7	; timing padding
+		DS	25		; 100T	;\
+		LD	A, R		; 9T	;/ 109T ch1→ch2 padding
+		LD	A, 0		; 7	; timing
 		LD	A, IYH		; 8	; load ch2 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	(seqPointer), SP	; 20	; save updated sequence pointer (SP advanced by POP)
 taskPointer_rs	EQU	$+1
@@ -501,10 +501,13 @@ taskPointer_rs	EQU	$+1
 		PUSH	HL			; 11	; push task_read_ptn onto task stack
 
 		EXX			; 4	; back to main regs
-		NOP			; 4	; timing
+		DS	16		; 64T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 78T ch2→noise padding
 		LD	A, H		; 4	; fake noise output (use LFSR high byte directly)
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE (approximate)
-		JP	soundLoop	; 10	; -1t, oh well
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
+		JP	soundLoop	; 10
 
 
 ;*******************************************************************************
@@ -515,20 +518,28 @@ doLoop
 		LD	HL, mloop	; 10	; reset sequence pointer to loop start
 		LD	(seqPointer), HL	; 16
 
-		EXX			; 4	; timing
-		NOP			; 4
+		EXX			; 4
+		DS	27		; 108T	; ch1→ch2 padding (8MHz compensation)
 		LD	A, IYH		; 8	; load ch2 output state
-		OUT	AUDIO_PORT, A	; 11 	; OUTPUT CH2  (1T over budget)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	SP, (taskPointer_rs)	; 20	; restore task stack pointer
 		DEC	SP		; 6	; task_read_seq is already on the stack from the
 		DEC	SP		; 6	; previous call - adjust SP to re-expose it
 
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		LD	A, (noiseVolume)	; 13	; load noise volume
 		CP	H		; 4
 		SBC	A, A		; 4	; gate noise
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop		; 10
+
+ch1Flag		DB	0		; saved carry from POP AF for ch1 update decision
+
 check
 
 ;*******************************************************************************
@@ -589,18 +600,24 @@ ptnPointer	EQU	$+1
 		LD	SP, 0		; 10	; load pattern data pointer into SP (self-mod)
 		POP	AF		; 11	; A = timer hi-byte, F = channel update flags
 		LD	I, A		; 9	; set timer high byte
-
+		LD	A, 0		; 7	; A = 0 (doesn't affect flags!)
+		RLA			; 4	; carry from POP AF → bit 0 of A
+					;	; RLA only affects C/H, NOT S/Z/P/V
+		LD	(ch1Flag), A	; 13	; save carry for JP C,noUpdateCh1
+		DS	17		; 68T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8	; load ch1 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		JR	Z, prepareSeqRead	;12/7	; if A (timer hi) was 0, end of pattern
 
 		LD	(ptnPointer), SP	;20	; save pattern pointer (SP may advance via POPs)
-						;TODO: unaccounted timing in this path
 
 taskPointer_rp	EQU	$+1
 		LD	SP, 0		; 10	; restore task stack pointer
 		EXX			; 4	; switch to shadow regs for flag testing
+		DS	20		; 80T	; ch1→ch2 padding (8MHz compensation)
 
 	; Now we test the flags in F to decide which channels to update.
 	; The flags were loaded by `pop af` above.
@@ -614,18 +631,24 @@ taskPointer_rp	EQU	$+1
 		JP	PE, noUpdateCh2		; 10	; P/V set = DON'T update ch2
 
 		LD	A, IYH		; 8	; load ch2 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 (1T over)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	HL, task_read_ch2	; 10	; P/V clear = update ch2
 		PUSH	HL		; 11	; push ch2 read task
+		LD	A, (ch1Flag)	; 13	; restore saved carry from POP AF
+		RRA			; 4	; bit 0 → carry
 		JP	C, noUpdateCh1	; 10	; C flag set = DON'T update ch1
 
 		LD	HL, task_read_ch1	; 10	; C flag clear = update ch1
-		PUSH	HL			; 11	 ;push ch1 read task
+		PUSH	HL			; 11	; push ch1 read task
 		EXX			; 4
 
+		DS	11		; 44T	;\
+		LD	A, 0		; 7T	;/ 51T ch2→noise padding
 		LD	A, H		; 4	; fake noise output (LFSR high byte)
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE (timing not ideal)
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
@@ -637,22 +660,23 @@ taskPointer_rp	EQU	$+1
 prepareSeqRead
 		LD	SP, (taskPointer_rp)	;20	; restore task stack
 		EXX			;4
-		LD	HL, task_read_seq	;10	;schedule sequence reader
+		LD	HL, task_read_seq	;10	; schedule sequence reader
 		PUSH	HL		;11
 		EXX			;4
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T ch1→ch2 padding
+		LD	A, IYH		; 8	; load ch2 output state
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
-		LD	A, IYH		;8	; load ch2 output state
-		OUT	AUDIO_PORT, A	;11	; OUTPUT CH2 
-
-		LD	A, 0		; 7	; timing padding (x4)
-		LD	A, 0		; 7
-		LD	A, 0		; 7
-		LD	A, 0		; 7
-		NOP			; 4
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 106T ch2→noise padding
 		LD	A, (noiseVolume)	; 13	; load noise volume
 		CP	H		; 4
 		SBC	A, A		; 4	; gate noise
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
@@ -670,33 +694,45 @@ noUpdateNoise					; noise not updated, check ch2 and ch1
 		PUSH	HL			; 11
 
 		LD	A, IYH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
+		LD	A, (ch1Flag)	; 13	; restore saved carry from POP AF
+		RRA			; 4	; bit 0 → carry
 		JP	C, noUpdateCh1	; 10	; C set = skip ch1
 
 		LD	HL, task_read_ch1	; 10	; update ch1
 		PUSH	HL		; 11
 		EXX			; 4
+		DS	12		; 48T	;\
+		LD	A, 0		; 7T	;/ 55T ch2→noise padding
 		LD	A, (noiseVolume)	; 13
 		CP	H		; 4
 		SBC	A, A		; 4
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
 noUpdateCh2				; ch2 not updated, check ch1
 		LD	A, IYH		; 8
+		RRCA			; 4	; bit 4 → bit 3
 		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
 
+		LD	A, (ch1Flag)	; 13	; restore saved carry from POP AF
+		RRA			; 4	; bit 0 → carry
 		JP	C, noUpdateCh1	; 10	; C set = skip ch1
 
 		LD	HL, task_read_ch1	; 10	; update ch1
 		PUSH	HL		; 11
 		EXX			; 4
+		DS	12		; 48T	;\
+		LD	A, 0		; 7T	;/ 55T ch2→noise padding
 		LD	A, (noiseVolume)	; 13
 		CP	H		; 4
 		SBC	A, A		; 4
-		OUT	AUDIO_PORT, A		; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
@@ -704,10 +740,14 @@ noUpdateCh1				; no ch1 update needed
 		LD	A, R		; 9	; timing padding
 		LD	A, R		; 9
 		EXX			; 4
+		DS	11		; 44T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 58T ch2→noise padding
 		LD	A, (noiseVolume)	; 13
 		CP	H		; 4
 		SBC	A, A		; 4
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 ;*******************************************************************************
@@ -730,8 +770,11 @@ task_read_ch1
 		LD	(taskPointer_c1), SP	; 20	; save task stack pointer
 		LD	SP, (ptnPointer)	; 20	; load pattern data pointer
 		POP	DE			; 11	; DE = note frequency divider for ch1
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8	; load ch1 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 (1T over)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		LD	A, D		; 4	; check bit 15 of divider (MSB of D)
 		ADD	A, A		; 4	; shift bit 7 of D into carry
@@ -742,10 +785,12 @@ task_read_ch1
 
 		LD	A, B		; 4	; check fx type via B value
 		ADD	A, A		; 4	; shift B left - tests for B=0 and B=#80
+		DS	25		; 100T	; ch1→ch2 padding (8MHz compensation)
 		LD	A, IYH		; 8	; load ch2 output state (for timing)
 		JR	Z, doSlideCh1	; 12/7	; if B was 0 or #80 after shift: it's a slide
 
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	IX, 0		; 14	; reset ch1 phase accumulator (new note)
 
@@ -757,7 +802,11 @@ taskPointer_c1	EQU	$+1
 		PUSH	HL		; 11	; schedule vibrato setup as another task
 		EXX			; 4
 
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE (A still has IYH value - fake)
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE (fake)
 		JP	soundLoop	; 10
 
 
@@ -768,43 +817,59 @@ noFxReloadCh1				; bit 15 was set: just reload note, no fx change
 
 		LD	A, R		; 9	; timing padding
 		LD	(ptnPointer), SP	; 20	; save pattern pointer (only 1 word consumed)
+		DS	22		; 88T	; ch1→ch2 padding (8MHz compensation)
 		LD	A, IYH		; 8	; load ch2 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	SP, (taskPointer_c1)	; 20	; restore task stack pointer
 		LD	IX, 0			; 14	; reset ch1 phase accumulator
 
 vibrInit1	EQU	$+1
 		LD	B, 0		; 7	; reset vibrato counter to init value (self-mod)
-		LD	A, 0		; 7	; timing
-		NOP			; 4
-
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		LD	A, H		; 4	; fake noise output
-		OUT	AUDIO_PORT, A	; 11
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
 doSlideCh1				; B was 0 or 0x80: configure slide effect
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 (5T over budget, oops)
+		JP	C, doSlideUpCh1	; 10	; test carry BEFORE RRCA! (RRCA corrupts carry)
+						; carry from ADD A,A: B=#80 = slide up
 
+		; Slide DOWN path (carry was clear, B was 0)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 		LD	SP, (taskPointer_c1)	;20	; restore task stack pointer
-		JP	C, doSlideUpCh1	; 10	; carry from ADD A,A above: B=#80 = slide up
-
 		LD	A, 0xC3		; 7	; 0xC3 = JP opcode = slide down
 		LD	(fxType1), A	; 13	; patch fxType1 to unconditional JP (always subtract)
 
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		LD	A, H		; 4	; fake noise output
-		OUT	AUDIO_PORT, A	; 11
-		JP	soundLoop	;10
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
+		JP	soundLoop	; 10
 
 
 doSlideUpCh1
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
+		LD	SP, (taskPointer_c1)	;20	; restore task stack pointer
 		LD	A, 0xDA		; 7	; 0xDA = JP C opcode = slide up
 		LD	(fxType1), A	; 13	; patch fxType1 (carry is always clear at test point,
 						; so JP C is never taken -> falls through to add path)
 
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		LD	A, H		; 4	; fake noise output
-		OUT	AUDIO_PORT, A	; 11
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 ;*******************************************************************************
@@ -821,10 +886,11 @@ task_read_vib1
 		EXX			; 4
 		DEC	HL		; 6	; timing padding
 		LD	HL, (ptnPointer)	; 16	; load pattern data pointer
-
-		NOP			; 4	; timing
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8	; load ch1 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		DEC	HL		; 6	; back up 1 byte to peek at vibrato init byte
 						;(it's the last byte of the fx params word we
@@ -836,16 +902,21 @@ task_read_vib1
 		LD	(vibrInit1), A	; 13	; store init value for B counter resets
 		LD	A, (hl)		; 7	; look up bit command opcode from table
 		LD	(vibrSpeed1), A	; 13	; patch vibrSpeed1 (the `bit N,b` instruction)
-
+		DS	25		; 100T	;\
+		LD	A, R		; 9T	;/ 109T ch1→ch2 padding
 		EXX			; 4
 		LD	A, IYH		; 8	; load ch2 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
-		DS	8		; 32	; timing padding
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 106T ch2→noise padding
 		LD	A, (noiseVolume)	; 13
 		CP	H		; 4
 		SBC	A, A		; 4
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 ;*******************************************************************************
@@ -866,8 +937,11 @@ task_read_ch2
 		LD	SP, (ptnPointer)	; 20	; load pattern data pointer
 		EXX			; 4	; switch to shadow regs (DE' = ch2 divider)
 		POP	DE		; 11	; DE' = note frequency divider for ch2
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8	; load ch1 output state
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 (5T over)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		LD	A, D		; 4	; check bit 15 of divider
 		ADD	A, A		; 4
@@ -879,10 +953,12 @@ task_read_ch2
 		LD	A, H		; 4	; B = fx type/init value (same role as B in ch1)
 		LD	B, A		; 4
 		ADD	A, A		; 4	; test for 0 or #80
+		DS	25		; 100T	; ch1→ch2 padding (8MHz compensation)
 		LD	A, IYH		; 8	; load ch2 output state
 		JR	Z, doSlideCh2	; 12/7	; if 0 or #80: slide effect
 
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	A, L		; 4	; L = fx depth
 		LD	(fxDepth2), A	; 13	; patch self-mod depth value
@@ -895,7 +971,11 @@ taskPointer_c2	EQU	$+1
 		PUSH	HL		; 11
 		EXX			; 4	; back to main regs
 
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE (timing rough)
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
@@ -906,40 +986,60 @@ noFxReloadCh2					; bit 15 set: just reload note
 
 		LD	A, R		; 9	; timing
 		LD	(ptnPointer), SP	; 20	; save pattern pointer
+		DS	22		; 88T	; ch1→ch2 padding (8MHz compensation)
 		LD	A, IYH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
 		LD	SP, (taskPointer_c2)	;20	; restore task stack pointer
 		LD	IY, 0		; 14	; reset ch2 phase accumulator fully
 
 vibrInit2	EQU	$+1
 		LD	B, 0		; 7	; reset vibrato counter (self-mod)
-		LD	A, 0		; 7	; timing
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		EXX			; 4	; back to main regs
 
 		LD	A, H		; 4	; fake noise output
-		OUT	AUDIO_PORT, A	; 11
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 
 doSlideCh2					; configure slide effect for ch2
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 (over budget)
+		JR	NC, doSlideDownCh2	; 12/7	; test carry BEFORE RRCA! (RRCA corrupts carry)
+						; no carry from ADD = B was 0 = slide down
 
+		; Slide UP path (carry was set, B was #80)
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 		EXX			; 4	; back to main regs
 		LD	SP, (taskPointer_c2)	; 20	; restore task stack pointer
-		JR	NC, doSlideDownCh2	; 12/7	; no carry from ADD = B was 0 = slide down
 		LD	A, 0xDA		; 7	; 0xDA = JP C = slide up
 		LD	(fxType2), A	; 13
 
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
 		LD	A, H		; 4	; fake noise output
-		OUT	AUDIO_PORT, A	; 11
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 doSlideDownCh2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
+		EXX			; 4	; back to main regs
+		LD	SP, (taskPointer_c2)	; 20	; restore task stack pointer
 		LD	A, 0xC3		; 7	; 0xC3 = JP = slide down
 		LD	(fxType2), A	; 13
 
-		OUT	AUDIO_PORT, A	; 11	; fake noise (A=0xC3, bit 4 clear -> speaker off)
+		DS	15		; 60T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 74T ch2→noise padding
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; fake noise (speaker off)
 		JP	soundLoop	; 10
 
 ;*******************************************************************************
@@ -954,10 +1054,11 @@ task_read_vib2
 		EXX			; 4
 		DEC	HL		; 6	; timing
 		LD	HL, (ptnPointer)	; 16	; load pattern data pointer
-
-		NOP			; 4
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		DEC	HL		; 6	; peek back at vibrato init byte
 		LD	A, (hl)		; 7	; A = vibrato init value
@@ -967,16 +1068,21 @@ task_read_vib2
 		LD	(vibrInit2), A	; 13	; store init value for B counter resets
 		LD	A, (hl)		; 7	; look up bit N,b opcode
 		LD	(vibrSpeed2), A	; 13	; patch vibrSpeed2
-
+		DS	25		; 100T	;\
+		LD	A, R		; 9T	;/ 109T ch1→ch2 padding
 		EXX			; 4
 		LD	A, IYH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
-		DS	8		; 32	; timing padding
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 106T ch2→noise padding
 		LD	A, (noiseVolume)	; 13
 		CP	H		; 4
 		SBC	A, A		; 4
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 ;*******************************************************************************
@@ -994,8 +1100,11 @@ task_read_noise
 		LD	(taskPointer_n), SP	; 20	; save task stack pointer
 		LD	SP, (ptnPointer)	; 20	; load pattern data pointer
 		POP	HL		; 11		; HL = noise params (H=pitch, L=volume)
+		DS	23		; 92T	;\
+		LD	A, 0		; 7T	;/ 99T entry padding (noise→ch1 gap)
 		LD	A, IXH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
 		LD	(ptnPointer), SP	; 20	; save advanced pattern pointer
 		LD	A, H		; 4	; A = noise pitch value
@@ -1003,12 +1112,12 @@ task_read_noise
 
 		LD	A, L		; 4	; A = noise volume threshold
 		LD	(noiseVolume), A	; 13	; patch noise volume in main loop
-
-		LD	A, 0		; 7	; timing
+		DS	25		; 100T	;\
+		LD	A, R		; 9T	;/ 109T ch1→ch2 padding
 		LD	A, IYH		; 8
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2
+		RRCA			; 4	; bit 4 → bit 3
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
 
-		LD	A, 0		; 7	; timing
 		EX	AF, AF'		; 4	; switch to noise prescaler
 		LD	A, H		; 4	; initialize prescaler with pitch value
 		EX	AF, AF'		; 4	; switch back
@@ -1016,9 +1125,12 @@ taskPointer_n	EQU	$+1
 		LD	SP, 0		; 10	; restore task stack pointer
 		LD	HL, 1		; 10	; reset noise LFSR seed to 1
 						;(0 would produce no noise - LFSR needs a seed)
-
+		DS	20		; 80T	;\
+		LD	A, 0		; 7T	; \
+		LD	A, 0		; 7T	;/ 94T ch2→noise padding
 		XOR	A		; 4	; A = 0 (noise output will be silent this cycle)
-		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only (no-op: A=0)
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 		JP	soundLoop	; 10
 
 ;*******************************************************************************

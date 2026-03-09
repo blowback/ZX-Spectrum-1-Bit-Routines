@@ -185,8 +185,16 @@ musicData
 ;
 ; Other changes:
 ;
-; 1) different output port for beeper
-; 2) different bit (bit 3) in port for beeper
+; 1) different output port for beeper and input port for keyboard
+; 2) different bit (bit 3) in port for beeper - usual RRCA trick
+; 3) pad all the timings from 224T to 512T (183T in ch1->ch2, 
+; 183T in ch2->noise, 146T in noise -> ch1) to compensate for new 
+; high clock speed: whew, there are a lot of places where we need
+; to do this!
+; 
+; This was an absolute PITA to port! Key lesson: don't write unmasked
+; crap to the 16C550 MCR register: you can inadvertently turn on loopback
+; mode which renders the speaker output inactive.
 ;
 KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
 AUDIO_PORT	EQU	0x24	; 16c550 MCR 
@@ -228,75 +236,67 @@ looping		EQU	1		; 1 = loop song, 0 = play once then exit
 		LD	I, A		; I register doubles as timer high byte
 		JP	task_read_seq	; begin by reading the first sequence entry
 
-; MAIN SOUND LOOP
-; Core audio loop. Runs continuously, outputting 3 interleaved samples per
-; iteration (ch1, ch2, noise). Total loop = 224 T-states.
-;
-; Checks for phase accumulator overflows and timer expiry, pushing task
-; addresses onto the stack when events occur. The final `ret` pops and
-; executes the next pending task (or task_idle if none pending).
-;
-; Output spacing: ch1 OUT at +80T, ch2 OUT at +80T, noise OUT at +64T
+; MAIN SOUND LOOP - 8MHz MicroBeast version
+; Total loop = 512 T-states (was 224T at 3.5MHz Spectrum)
+; RRCA before each tone OUT rotates bit 4 (Spectrum speaker) → bit 3 (AUDIO_BIT)
+; keeping the same frequency dividers.
+; Output spacing: ch1 OUT at +183T, ch2 OUT at +183T, noise OUT at +146T
 soundLoop
-		ADD	IX, DE		; 15		; add frequency divider to ch1 phase accumulator
-		LD	A, IXH		; 8		; A = hi byte of ch1 accu (bit 7 = speaker state)
+		DS	25		; 100T	; noise→ch1 gap padding (8MHz compensation)
+		ADD	IX, DE		; 15	; add frequency divider to ch1 phase accumulator
+		LD	A, IXH		; 8	; A = hi byte of ch1 accu
 
-		EXX			; 4		; switch to shadow regs (C' = 0xFE = output port)
-		JP	NC, skip1	; 10		; no carry = no overflow, skip fx task push
+		EXX			; 4	; switch to shadow regs
+		JP	NC, skip1	; 10	; no carry = no overflow, skip fx task push
 
-		LD	HL, task_update_fx1	;10	; ch1 accu overflowed: completed one full wave cycle
-		PUSH	HL		; 11		; schedule fx update task on the task stack
+		LD	HL, task_update_fx1	; 10	; ch1 accu overflowed
+		PUSH	HL		; 11	; schedule fx update task
 
 ret1
-		OUT	(c), A		; 12		; OUTPUT CH1 port C' = 0xFE, bit 4 of A drives speaker
+		RRCA			; 4	; rotate bit 4 → bit 3 for AUDIO_BIT
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH1 ___183
 
-		LD	HL, timerLo	; 10		; point HL at timer low byte counter
-		DEC	(hl)		; 11		; decrement timer low byte
-		JR	NZ, skip3	; 12/7		; if not zero yet, skip timer task
+		DS	18		; 72T	; ch1→ch2 gap padding (reduced: RRCA+OUT now after overflow test)
+		LD	HL, timerLo	; 10	; point HL at timer low byte counter
+		DEC	(HL)		; 11	; decrement timer low byte
+		JR	NZ, skip3	; 12/7	; if not zero yet, skip timer task
 
-		INC	HL		; 6		; HL now = timerLo+1 = address of task_update_timer
-							; (clever trick: task_update_timer label is placed
-							; right after the timerLo byte in memory)
-		PUSH	HL		; 11		; schedule timer update task
+		INC	HL		; 6	; HL → task_update_timer (timerLo+1)
+		PUSH	HL		; 11	; schedule timer update task
 
 ret3
-		ADD	IY, DE		;15		; add frequency divider to ch2 phase accumulator
-		LD	A, IYH		;8		; A = hi byte of ch2 accu
-		OUT	(c), A		;11		; OUTPUT CH2
-		JR	NC, skip2	;12/7		; no overflow, skip fx task push
+		ADD	IY, DE		; 15	; add frequency divider to ch2 phase accumulator
+		LD	A, IYH		; 8	; A = hi byte of ch2 accu
+		JR	NC, skip2	; 12/7	; test carry from ADD BEFORE RRCA (RRCA corrupts carry!)
 
-		LD	HL, task_update_fx2	;10	; ch2 accu overflowed
-		PUSH	HL		;11		; schedule ch2 fx update task
+		LD	HL, task_update_fx2	; 10	; ch2 accu overflowed
+		PUSH	HL		; 11	; schedule ch2 fx update task
 
 ret2
-		INC	HL		;6		; timing padding (result discarded)
-		EXX			;4		; switch back to main regs (HL = noise LFSR)
+		RRCA			; 4	; rotate bit 4 → bit 3 for AUDIO_BIT
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT CH2 ___183
+		EXX			; 4	; switch back to main regs (HL = noise LFSR)
+		DS	27		; 108T	; ch2→noise gap padding
 noiseVolume	EQU	$+1
-		LD	A, 0x0		;7		; A = noise volume threshold (self-modifying code:
-							; the 0x0 operand is patched at runtime by task_read_noise)
-							; TODO: if we do ld a,(noiseVolume), we don't need
-							; timing adjust and can save 6t elsewhere
-		CP	H		;4		; compare volume threshold to noise LFSR high byte
-		SBC	A, A		;4		; A = 0xFF if threshold > H (noise on), else #00
-							; this gates the noise output by volume level
-		OUT	AUDIO_PORT, A	;11		; OUTPUT NOISE
+		LD	A, 0x0		; 7	; noise volume threshold (self-mod)
+		CP	H		; 4	; compare to noise LFSR high byte
+		SBC	A, A		; 4	; A = 0xFF if threshold > H, else 0x00
+		AND	AUDIO_BIT	; 7	; mask to bit 3 only (avoid MCR side effects)
+		OUT	AUDIO_PORT, A	; 11	; OUTPUT NOISE ___146
 
-		RET			;11		; pop next task from stack and jump to it
-					;224		; (default: task_idle when stack is at stk_idle)
+		RET			; 11	; pop next task and jump to it
+					; 512T
 
-; TIMING EQUALIZATION STUBS
-; When a counter does NOT overflow, these stubs burn the same T-states as
-; the overflow path (ld hl,imm16 + push hl) to keep output timing constant.
-skip1					 		; ch1 didn't overflow
-		NOP			;4		; \
-		LD	L, 0		;7		;  > 21T = matches ld hl,nn (10) + push hl (11)
-		JP	ret1		;10		; /
-skip2							; ch2 didn't overflow
-		NOP			;4		; \  16T (close match)
-		JR	ret2		;12		; /
-skip3							; timer didn't expire
-		JR	ret3		;12		; matches the inc+push path timing
-							; (jr taken=12 vs jr nz not-taken=7, inc=6, push=11)
+; Timing equalization stubs (match overflow path T-states)
+skip1						; ch1 didn't overflow
+		NOP			; 4	;\
+		LD	L, 0		; 7	; > 21T = LD HL,nn (10) + PUSH (11)
+		JP	ret1		; 10	;/
+skip2						; ch2 didn't overflow
+		NOP			; 4	;\  16T
+		JR	ret2		; 12	;/
+skip3						; timer didn't expire
+		JR	ret3		; 12
 
 ; TASK STACK
 ; 30 bytes of stack space for pending task addresses (up to 15 entries).
