@@ -540,7 +540,7 @@ musicData
 ;
 ;******************************************************************
 ; Ant's notes:
-;  
+;
 ; wtbeep is a 3-channel 1-bit beeper engine
 ;  -  pin-pulse interleaving
 ;  - 32 different timbres without branching in inner loop thanks to
@@ -555,7 +555,7 @@ musicData
 ;     HL  = channel 1 phase accumulator
 ;     DE  = channel 1 frequency divider (added to HL each sample)
 ;     B   = tick counter (low byte, counts samples per tick)
-;     C   = 0x10 (output bitmask for speaker bit on port 0xFE)
+;     C   = 0x10 (internal audio bitmask - RRCA shifts to AUDIO_BIT before OUT)
 ;   Alt set (EXX):
 ;     HL  = channel 2 phase accumulator
 ;     BC  = channel 2 frequency divider
@@ -565,8 +565,17 @@ musicData
 ;   IX   = sweep counter (very slow) - ixh used in algo
 ;   IY   = sweep counter - iyl (fast), iyh (slow) used in algos
 ;
+; PORTING NOTES (ZX Spectrum 3.5MHz -> MicroBeast 8MHz):
+; - move to KB_PORT and AUDIO_PORT
+; - RRCA before each out to bring bit 4 -> bit 3
+; - change drum masks from AND 0xf8 to AND 0x10; RRCA
+; - melody timing pad: inner loop 190T -> 449T (DS NOPs)
+;               distributed for even PPI spacing
+; - drum timing pad: noise drum 65T -> 149T (2o NOPs)
+;                    kick drum non-slide 134T, slide 184 T
+
 KB_PORT		EQU	0x00	; 0x0n, A[15:8] = 0xfe, 0xfd, 0xfb, 0xf7
-AUDIO_PORT	EQU	0x24	; 16c550 MCR 
+AUDIO_PORT	EQU	0x24	; 16c550 MCR
 AUDIO_BIT	EQU	0x08	; bit 3
 
 
@@ -617,7 +626,7 @@ rdptn0
 		LD	(ptnpntr), DE	; store pattern pointer
 
 readPtn
-		IN	A, 0xFE		; read keyboard port
+		IN	A, (KB_PORT)	; read keyboard port
 		CPL			; invert (keys active-low)
 		AND	0x1F		; mask key bits (bottom 5 bits)
 		JR	NZ, exit	; if any key pressed, exit
@@ -770,8 +779,8 @@ _noUpd3
 		LD	IY, 0		; reset sweep registers (used by duty sweep waveforms)
 		LD	IXH, 0
 _noSweepReset
-		JR	C, drum1	; C set (bit 0) = trigger kick drum
-		JR	Z, drum2	; Z set (bit 6) = trigger noise/hihat drum
+		JP	C, drum1	; C set (bit 0) = trigger kick drum
+		JP	Z, drum2	; Z set (bit 6) = trigger noise/hihat drum
 		DEC	SP		; no drum: only 1 byte was data (the 0),
 					; POP read 2, so back up SP by 1
 drumRet
@@ -783,69 +792,82 @@ fdiv3		EQU	$+1		; self-modifying: ch3 frequency divider
 		LD	SP, 0		; SP = ch3 freq div (used by ADD HL,SP in loop)
 
 		LD	A, C		; A = tempo counter (ticks remaining)
-		LD	C, 0x10		; C = speaker bit mask (bit 4 of port #FE)
+		LD	C, 0x10		; C = internal audio bitmask (bit 4)
+					; (RRCA before each OUT shifts to AUDIO_BIT)
 
 ; SAMPLE GENERATION LOOP
 ; Each iteration produces 3 output samples (one per channel) by:
 ;   1. Advancing the channel's phase accumulator (ADD HL,freq)
 ;   2. Taking H (high byte of accumulator) as the "phase" value
 ;   3. Running the waveform algorithm on it (5 bytes of self-modified code)
-;   4. Masking with C (#10) to get speaker bit, then OUT to port #FE
+;   4. Masking with 0x10 to extract bit 4, RRCA to shift to bit 3 (AUDIO_BIT)
+;   5. OUT to AUDIO_PORT
 ;
-; The waveform algorithms transform the sawtooth-like phase value in A/H
-; into various shaped outputs. Only bit 4 of the OUT value matters for
-; the speaker, so the algorithms just need to set/clear that bit in the
-; right pattern to create different duty cycles and timbres.
+; Inner loop = 440 t-states (vs 192 on Spectrum) to match sample rate
+; at 8 MHz. Sections between OUTs: 144 + 148 + 148 = 440.
 playNote0
 		EX	AF, AF'		; save tick count in AF'
 		XOR	A		; A = 0 (initial output state)
 
 playNote
 	; --- Channel 1 output ---
-		ADD	HL, DE          ;11	; advance ch1 phase accumulator
-		OUT	0xFE, A         ;11	; output previous channel's sample (or 0 first time)
+		ADD	HL, DE		; 11  advance ch1 phase accumulator
+		RRCA			;  4  shift bit 4 -> bit 3 (AUDIO_BIT)
+		OUT	(AUDIO_PORT), A	; 11  OUT1: ch3 from prev iteration (or 0 first time)
 
-		LD	A, H            ; 4	; A = ch1 phase (high byte of accumulator)
+		LD	A, H		;  4  A = ch1 phase (high byte of accumulator)
 
-algo1					; 5 bytes of self-modifying waveform code for ch1
-		DS	5               ;20	; (patched from mixAlgo table at row parse time)
+algo1					;     5 bytes of self-modifying waveform code for ch1
+		DS	5		; 20  (patched from mixAlgo table at row parse time)
 
-		AND	C               ; 4	; mask with #10 to isolate speaker bit
-		RET	C               ; 5	; (C flag never set here; acts as 5-cycle NOP)
-		NOP                     ; 4	; timing padding
-		OUT	0xFE, A         ;11	; output ch1 sample ___48 t-states for ch1 section
+		AND	C		;  4  mask with 0x10 to isolate audio bit
+		RET	C		;  5  (C flag never set here; acts as 5-cycle NOP)
+		NOP			;  4  timing padding (original)
+		DS	23		; 92  timing padding (8 MHz)
+		RRCA			;  4  shift bit 4 -> bit 3 (AUDIO_BIT)
+		OUT	(AUDIO_PORT), A	; 11  OUT2: ch1 sample
+					;----
+					;144  (OUT1 -> OUT2)
 
 	; --- Channel 2 output ---
-		EXX                     ; 4	; switch to alt registers (ch2/ch3)
+		EXX			;  4  switch to alt registers (ch2/ch3)
 
-		ADD	HL, BC          ;11	; advance ch2 phase accumulator
-		LD	A, H            ; 4	; A = ch2 phase
+		ADD	HL, BC		; 11  advance ch2 phase accumulator
+		LD	A, H		;  4  A = ch2 phase
 
-algo2					; 5 bytes of self-modifying waveform code for ch2
-		DS	5               ;20
+algo2					;     5 bytes of self-modifying waveform code for ch2
+		DS	5		; 20
 
-		AND	0x10            ; 7	; mask speaker bit (immediate, not from C)
+		AND	0x10		;  7  mask audio bit (immediate)
 
-		EX	DE, HL          ; 4	; swap: DE now has ch2 accum, HL has ch3 accum
+		EX	DE, HL		;  4  swap: DE'=ch2 accum, HL'=ch3 accum
 
 	; --- Channel 3 output ---
-		ADD	HL, SP          ;11	; advance ch3 phase accumulator (SP = ch3 freq!)
+		ADD	HL, SP		; 11  advance ch3 phase accumulator (SP = ch3 freq!)
 
-		OUT	0xFE, A         ;11	; output ch2 sample ___72 t-states for ch2 section
+		DS	18		; 72  timing padding (8 MHz)
+		RRCA			;  4  shift bit 4 -> bit 3 (AUDIO_BIT)
+		OUT	(AUDIO_PORT), A	; 11  OUT3: ch2 sample
+					;----
+					;148  (OUT2 -> OUT3)
 
-		LD	A, H            ; 4	; A = ch3 phase
+		LD	A, H		;  4  A = ch3 phase
 
-algo3					; 5 bytes of self-modifying waveform code for ch3
-		DS	5               ;20
+algo3					;     5 bytes of self-modifying waveform code for ch3
+		DS	5		; 20
 
-		EX	DE, HL          ; 4	; swap back: HL=ch2 accum, DE=ch3 accum
-		EXX                     ; 4	; back to main register set
+		EX	DE, HL		;  4  swap back: HL'=ch2 accum, DE'=ch3 accum
+		EXX			;  4  back to main register set
 
-		AND	C               ; 4	; mask ch3 output with speaker bit
+		AND	C		;  4  mask ch3 output with audio bit
 
-		DEC	B               ; 4	; decrement sample counter (B = tick length lo)
-		JP	NZ, playNote    ;10	; loop until tick complete
-			        ;192	; total inner loop = 192 t-states per sample
+		DS	18		; 72  timing padding (8 MHz)
+		DEC	B		;  4  decrement sample counter (B = tick length lo)
+		JP	NZ, playNote	; 10  loop until tick complete
+					;----
+					;148  (OUT3 -> next OUT1, incl ADD+RRCA+OUT)
+					;====
+					;440  total per iteration (vs 192 @ 3.5 MHz)
 
 	; --- End of tick: update sweep counters ---
 	; The sweep counters provide slowly-changing values used by
@@ -892,18 +914,22 @@ setVol
 					; total = 168*3 = 504 samples
 sloop
 	; LFSR noise generation (Galois LFSR)
-		ADD	HL, HL		;11	; shift LFSR left
-		SBC	A, A		;4	; A = #FF if carry was set, else 0
-		XOR	L		;4	; XOR feedback into low byte
-		LD	L, A		;4	; update LFSR
+		ADD	HL, HL		; 11  shift LFSR left
+		SBC	A, A		;  4  A = #FF if carry was set, else 0
+		XOR	L		;  4  XOR feedback into low byte
+		LD	L, A		;  4  update LFSR
 
 dvol		EQU	$+1
-		CP	0x80		;7	; compare with volume threshold
-		SBC	A, A		;4	; A = #FF if below threshold (noise on), else 0
+		CP	0x80		;  7  compare with volume threshold
+		SBC	A, A		;  4  A = #FF if below threshold (noise on), else 0
 
-		AND	0xF8			; mask for port #FE (speaker + border bits)
-		OUT	0xFE, A		;11	; output noise sample
-		DJNZ	sloop		;13/8	; inner loop
+		AND	0x10		;  7  isolate audio bit (bit 4)
+		RRCA			;  4  shift bit 4 -> bit 3 (AUDIO_BIT)
+		OUT	(AUDIO_PORT), A	; 11  output noise sample
+		DS	20		; 80  timing padding (8 MHz)
+		DJNZ	sloop		; 13  inner loop
+					;----
+					;149  per iteration (vs 65 @ 3.5 MHz)
 
 		DEC	C		;4	; outer loop
 		JR	NZ, sloop	;12
@@ -932,24 +958,27 @@ drum1
 		LD	C, 0x3		; outer loop count (3 iterations)
 
 xlllp
-		ADD	HL, DE		; advance phase accumulator
-		JR	C, _noUpd	; if overflow, skip pitch slide this sample
-		LD	A, E		; reduce frequency (pitch slides down)
+		ADD	HL, DE		; 11  advance phase accumulator
+		JR	C, _noUpd	;12/7 if overflow, skip pitch slide this sample
+		LD	A, E		;  4  reduce frequency (pitch slides down)
 _slideSpeed	EQU	$+1
-		SUB	0x10		; slide speed (self-modifiable)
-		LD	E, A
-		SBC	A, A		; propagate borrow to D
-		ADD	A, D
-		LD	D, A
+		SUB	0x10		;  7  slide speed (self-modifiable)
+		LD	E, A		;  4
+		SBC	A, A		;  4  propagate borrow to D
+		ADD	A, D		;  4
+		LD	D, A		;  4
+		DS	7		; 28  extra padding for slide path (8 MHz)
 _noUpd
-		LD	A, H		; output high byte of phase accumulator
-		AND	0xF8		; mask for port #FE
-		OUT	0xFE, A		; output kick sample
-		DJNZ	xlllp		; inner loop (B starts at 0, wraps to 256)
-		DEC	C
-		JR	NZ, xlllp	; outer loop
-
-					;45680 t-states total (/192 = ~237 samples)
+		LD	A, H		;  4  output high byte of phase accumulator
+		AND	0x10		;  7  isolate audio bit (bit 4)
+		RRCA			;  4  shift bit 4 -> bit 3 (AUDIO_BIT)
+		OUT	(AUDIO_PORT), A	; 11  output kick sample
+		DS	18		; 72  timing padding (8 MHz)
+		DJNZ	xlllp		; 13  inner loop (B starts at 0, wraps to 256)
+		DEC	C		;  4
+		JR	NZ, xlllp	; 12  outer loop
+					; non-slide: 134, slide: 184 t-states per sample
+					; (vs 58/80 @ 3.5 MHz, ratio ~2.3x ≈ 8/3.5)
 deRest		EQU	$+1
 		LD	DE, 0		; restore registers
 
